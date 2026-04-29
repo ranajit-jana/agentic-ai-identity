@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# CA private keys and agent certs — never commit
+ca-data/
+.certs/
+identity/provisioner.json

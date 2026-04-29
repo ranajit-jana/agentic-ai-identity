@@ -1,0 +1,30 @@
+services:
+  step-ca:
+    image: smallstep/step-ca:latest
+    environment:
+      DOCKER_STEPCA_INIT_NAME: AgentCA
+      DOCKER_STEPCA_INIT_DNS_NAMES: localhost,step-ca
+      DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT: "true"
+      DOCKER_STEPCA_INIT_PASSWORD: ${STEP_CA_PASSWORD:-changeme}
+    volumes:
+      - ./ca-data:/home/step
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "https://localhost:9000/health", "--no-check-certificate"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  opa:
+    image: openpolicyagent/opa:latest
+    command: run --server --log-level info /policies
+    volumes:
+      - ./policy:/policies
+    ports:
+      - "8181:8181"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8181/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
