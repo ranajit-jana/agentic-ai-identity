@@ -1,0 +1,27 @@
+{"ts": "2026-04-30T07:05:51Z", "agent_id": "agent-001", "role": "analyst", "tool": "weather", "allowed": true, "params_hash": "e55ffa058a4514de"}
+{"ts": "2026-04-30T07:05:51Z", "agent_id": "agent-001", "role": "analyst", "tool": "weather", "allowed": true, "params_hash": "ce0a9902d4c0e970"}
+{"ts": "2026-04-30T07:05:51Z", "agent_id": "agent-001", "role": "analyst", "tool": "weather", "allowed": true, "params_hash": "ce0a9902d4c0e970", "injection_rules": ["ignore_instructions", "call_tool_injection"], "detail": "injection_detected_in_tool_response"}
+{"ts": "2026-04-30T07:05:51Z", "agent_id": "agent-001", "role": "analyst", "tool": "calculator", "allowed": true, "params_hash": "657ffb429e2a3969"}
+{"ts": "2026-04-30T07:05:51Z", "agent_id": "agent-001", "role": "analyst", "tool": "calculator", "allowed": true, "params_hash": "657ffb429e2a3969", "injection_rules": ["bearer_token_leak"], "detail": "injection_detected_in_tool_response"}
+{"ts": "2026-04-30T07:05:51Z", "agent_id": "agent-001", "role": "analyst", "tool": "weather", "allowed": true, "params_hash": "d04318d598f46de3"}
+{"ts": "2026-04-30T07:05:51Z", "agent_id": "agent-001", "role": "analyst", "tool": "admin", "allowed": false, "params_hash": "67342cd8f30d2494", "detail": "opa_deny"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "e61770a8f04f1f55"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-999", "role": "analyst", "tool": "message.agent-001", "allowed": false, "params_hash": "720a3f381224f423", "detail": "opa_deny_message"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "68bcc18dee18616e"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": false, "params_hash": "68bcc18dee18616e", "injection_rules": ["ignore_instructions", "new_instructions", "call_tool_injection"], "detail": "injection_in_agent_message"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "156dd1c78b83453f"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": false, "params_hash": "156dd1c78b83453f", "injection_rules": ["bearer_token_leak"], "detail": "injection_in_agent_message"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "7e3c942c79a74713"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "2e482b9ae4cacd7b"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "491e7d4ee333c1b9"}
+{"ts": "2026-04-30T07:18:18Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": false, "params_hash": "491e7d4ee333c1b9", "injection_rules": ["ignore_instructions", "call_tool_injection"], "detail": "injection_in_agent_message"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "86633d5ac1ee4c91"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-999", "role": "analyst", "tool": "message.agent-001", "allowed": false, "params_hash": "f40bddd87a1eb61c", "detail": "opa_deny_message"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "35a6d1e5040ffe1b"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": false, "params_hash": "35a6d1e5040ffe1b", "injection_rules": ["ignore_instructions", "new_instructions", "call_tool_injection"], "detail": "injection_in_agent_message"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "f6c1434ea485f218"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": false, "params_hash": "f6c1434ea485f218", "injection_rules": ["bearer_token_leak"], "detail": "injection_in_agent_message"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "e4e7d32552296ab0"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "72310943ab706a67"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": true, "params_hash": "cd85eccc00ef0b6e"}
+{"ts": "2026-04-30T07:18:52Z", "agent_id": "agent-002", "role": "supervisor", "tool": "message.agent-001", "allowed": false, "params_hash": "cd85eccc00ef0b6e", "detail": "invalid_message_signature:signature verification failed"}

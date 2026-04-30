@@ -1,0 +1,27 @@
+{
+  "roles": {
+    "agent-001": "analyst",
+    "agent-002": "supervisor",
+    "agent-003": "admin"
+  },
+
+  "allowed_tools": {
+    "analyst":    ["weather", "calculator"],
+    "supervisor": ["weather", "calculator"],
+    "admin":      ["weather", "calculator", "admin"]
+  },
+
+  "agent_trust": {
+    "agent-001": {
+      "agent-002": "trusted"
+    },
+    "agent-002": {
+      "agent-001": "trusted",
+      "agent-003": "trusted"
+    },
+    "agent-003": {
+      "agent-001": "trusted",
+      "agent-002": "trusted"
+    }
+  }
+}
