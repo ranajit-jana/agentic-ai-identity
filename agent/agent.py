@@ -52,12 +52,12 @@ AGENT_ROLE  = os.getenv("AGENT_ROLE",  "analyst")
 CERTS_DIR   = Path(os.getenv("CERTS_DIR", ".certs"))
 MODEL       = os.getenv("AGENT_MODEL", "claude-sonnet-4-6")
 
-# Cert state loaded at startup
+# Cert bytes — loaded once at startup, refreshed in background by _keep_certs_fresh
 _cert_pem: bytes = b""
 _key_pem:  bytes = b""
 
-# HTTP client — real mode: AsyncClient(base_url=GATEWAY_URL)
-#               demo mode: AsyncClient(transport=ASGITransport(gateway_app))
+# Shared HTTP client — real mode: plain AsyncClient pointing at GATEWAY_URL
+#                      demo mode: ASGITransport routes in-process (no network socket needed)
 _http_client: httpx.AsyncClient | None = None
 
 
@@ -66,9 +66,14 @@ _http_client: httpx.AsyncClient | None = None
 # ---------------------------------------------------------------------------
 
 def _make_request_token() -> str:
-    """Sign a 60-second identity JWT with the agent's cert private key."""
+    """Sign a 60-second identity JWT with the agent's cert private key.
+
+    Short TTL (60 s) means a stolen token is useless after the next minute.
+    The LLM never sees this token — it stays in the HTTP client layer.
+    """
     private_key = load_pem_private_key(_key_pem, password=None)
     cert        = x509.load_pem_x509_certificate(_cert_pem)
+    # Embed the cert in the x5c header so the gateway can verify the chain
     cert_der_b64 = base64.b64encode(
         cert.public_bytes(serialization.Encoding.DER)
     ).decode()
@@ -80,10 +85,10 @@ def _make_request_token() -> str:
             "delegated_by":     "",
             "delegation_scope": [],
             "delegation_depth": 0,
-            "aud":              "gateway",
+            "aud":              "gateway",    # gateway rejects tokens with wrong audience
             "iat":              now,
-            "exp":              now + 60,
-            "jti":              str(uuid.uuid4()),
+            "exp":              now + 60,     # 60-second window — expire fast
+            "jti":              str(uuid.uuid4()),  # unique per request — prevents replay
         },
         private_key,
         algorithm="ES256",
@@ -94,12 +99,13 @@ def _make_request_token() -> str:
 async def _call_gateway(tool_name: str, body: dict) -> dict:
     """POST to gateway with a fresh signed JWT. JWT is never in LLM context."""
     assert _http_client, "call setup() first"
-    token = _make_request_token()
+    token = _make_request_token()   # fresh token per call — no reuse
     r = await _http_client.post(
         f"/tool/{tool_name}",
         json=body,
         headers={"Authorization": f"Bearer {token}"},
     )
+    # Return structured error dict instead of raising — LLM can read it and explain
     if r.status_code == 403:
         return {"error": "access_denied", "detail": r.json().get("detail", "forbidden")}
     if r.status_code == 401:
@@ -142,10 +148,15 @@ async def admin_action(action: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _make_demo_pki() -> tuple[bytes, bytes, bytes]:
-    """Generate a throwaway CA + agent cert signed by it."""
+    """Generate a throwaway CA + agent cert signed by it.
+
+    Used in demo mode so we can run a full end-to-end flow without
+    setting up Step CA. Certs expire in 1 hour and are never saved to disk.
+    """
     ca_key = generate_private_key(SECP256R1())
     now    = datetime.datetime.now(datetime.timezone.utc)
 
+    # Self-signed CA cert
     ca_cert = (
         x509.CertificateBuilder()
         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "DemoCA")]))
@@ -158,6 +169,7 @@ def _make_demo_pki() -> tuple[bytes, bytes, bytes]:
         .sign(ca_key, hashes.SHA256())
     )
 
+    # Agent cert signed by demo CA — CN must match AGENT_ID (gateway checks this)
     agent_key  = generate_private_key(SECP256R1())
     agent_cert = (
         x509.CertificateBuilder()
@@ -195,12 +207,14 @@ async def setup(demo: bool = False) -> None:
         print("[agent] demo mode — generating throwaway certs, routing in-process")
         _cert_pem, _key_pem, ca_pem = _make_demo_pki()
 
-        # Patch gateway module to trust our demo CA (same process as ASGI transport)
+        # Patch gateway module globals so it trusts our demo CA
+        # This works because demo mode runs everything in the same Python process
         import gateway.gateway as gw
         gw._INTERMEDIATE_CA = ca_pem
         gw._ROOT_CA         = ca_pem
 
-        # Use ASGI transport — no server process needed
+        # ASGITransport bypasses the network — requests go directly to the FastAPI app object
+        # This means no gateway server process is needed in demo mode
         _http_client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=gw.app),
             base_url="http://test",
@@ -216,7 +230,7 @@ async def setup(demo: bool = False) -> None:
         _key_pem     = (CERTS_DIR / "agent.key").read_bytes()
         _http_client = httpx.AsyncClient(base_url=GATEWAY_URL, timeout=10.0)
 
-        # Background cert renewal
+        # Start background cert renewal — keeps certs fresh without restarting the agent
         from identity.refresher import CertManager
         mgr = CertManager.from_env()
         await mgr.bootstrap()
@@ -226,6 +240,7 @@ async def setup(demo: bool = False) -> None:
 
 
 async def _keep_certs_fresh(mgr):
+    """Re-read cert files from disk every 30 s — picks up renewals written by CertManager."""
     global _cert_pem, _key_pem
     while True:
         await asyncio.sleep(30)
@@ -240,9 +255,11 @@ async def _keep_certs_fresh(mgr):
 # ---------------------------------------------------------------------------
 
 async def run_task(task: str) -> str:
+    """Create a fresh ReAct agent and run one task."""
     llm   = ChatAnthropic(model=MODEL, temperature=0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        # create_react_agent builds a ReAct loop: think → tool call → observe → think ...
         agent = create_react_agent(llm, tools=[get_weather, calculate, admin_action])
     result = await agent.ainvoke({"messages": [{"role": "user", "content": task}]})
     return result["messages"][-1].content
@@ -251,6 +268,7 @@ async def run_task(task: str) -> str:
 async def main(demo: bool) -> None:
     await setup(demo=demo)
 
+    # Three scenarios: two allowed, one denied — demonstrates policy enforcement end-to-end
     scenarios = [
         ("Allowed  — weather",    "What is the weather in Delhi?"),
         ("Allowed  — calculator", "What is 144 divided by 12?"),

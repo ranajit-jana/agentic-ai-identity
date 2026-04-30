@@ -35,6 +35,7 @@ CERTS_DIR = Path(".certs")
 # ---------------------------------------------------------------------------
 
 def make_ca():
+    """Self-signed CA cert used to issue all test agent certs."""
     key = generate_private_key(SECP256R1())
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
@@ -52,6 +53,7 @@ def make_ca():
 
 
 def make_agent_cert(agent_id: str, ca_key, ca_cert):
+    """Issue a leaf cert for agent_id signed by ca_key."""
     key = generate_private_key(SECP256R1())
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
@@ -71,6 +73,7 @@ def make_agent_cert(agent_id: str, ca_key, ca_cert):
 
 
 def make_jwt(agent_id: str, role: str, agent_key, agent_cert, **extra) -> str:
+    """Sign a gateway-bound JWT with the agent's private key + x5c cert header."""
     cert_der_b64 = base64.b64encode(
         agent_cert.public_bytes(serialization.Encoding.DER)
     ).decode()
@@ -85,7 +88,7 @@ def make_jwt(agent_id: str, role: str, agent_key, agent_cert, **extra) -> str:
         "iat": now,
         "exp": now + 60,
         "jti": str(uuid.uuid4()),
-        **extra,
+        **extra,   # allows tests to override delegation fields
     }
     return jwt.encode(
         payload,
@@ -108,7 +111,7 @@ async def run(label: str, response: httpx.Response, expected_status: int) -> boo
 
 
 async def main():
-    # Build test PKI
+    # Build test PKI — one CA, three agent certs
     ca_key, ca_cert = make_ca()
     ca_pem = ca_cert.public_bytes(serialization.Encoding.PEM)
 
@@ -116,18 +119,21 @@ async def main():
     admin_key,   admin_cert   = make_agent_cert("agent-003", ca_key, ca_cert)
     rogue_key,   rogue_cert   = make_agent_cert("agent-999", ca_key, ca_cert)
 
-    # Patch gateway's CA bytes to use our test CA (not Step CA)
+    # Patch gateway to trust our test CA instead of the real Step CA
+    # This lets tests run without any running infrastructure
     import gateway.gateway as gw
     gw._INTERMEDIATE_CA = ca_pem
     gw._ROOT_CA         = ca_pem
 
     passed = failed = 0
 
+    # ASGITransport routes HTTP requests directly into the FastAPI app object —
+    # no gateway process needed, but OPA and tool API must be running externally
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
 
-        # --- Happy path ---
+        # --- Happy path: analyst can call its allowed tools ---
         token = make_jwt("agent-001", "analyst", analyst_key, analyst_cert)
         r = await client.post("/tool/weather", json={"city": "london"},
                               headers={"Authorization": f"Bearer {token}"})
@@ -140,40 +146,41 @@ async def main():
         ok = await run("analyst calls calculator → 200", r, 200)
         passed += ok; failed += not ok
 
-        # --- Analyst cannot call admin tool ---
+        # --- Role-based denial: analyst cannot reach admin tool ---
         token = make_jwt("agent-001", "analyst", analyst_key, analyst_cert)
         r = await client.post("/tool/admin", json={"action": "list_agents"},
                               headers={"Authorization": f"Bearer {token}"})
         ok = await run("analyst calls admin → 403", r, 403)
         passed += ok; failed += not ok
 
-        # --- Admin can call admin tool ---
+        # --- Admin can call the admin tool ---
         token = make_jwt("agent-003", "admin", admin_key, admin_cert)
         r = await client.post("/tool/admin", json={"action": "list_agents"},
                               headers={"Authorization": f"Bearer {token}"})
         ok = await run("admin calls admin → 200", r, 200)
         passed += ok; failed += not ok
 
-        # --- Wrong role claim is denied by OPA ---
+        # --- Role inflation: agent-001 claims "admin" role but data.json says "analyst" ---
+        # OPA compares the claimed role against data.roles[agent_id] — mismatch → deny
         token = make_jwt("agent-001", "admin", analyst_key, analyst_cert)
         r = await client.post("/tool/admin", json={"action": "list_agents"},
                               headers={"Authorization": f"Bearer {token}"})
         ok = await run("agent-001 claiming 'admin' role → 403", r, 403)
         passed += ok; failed += not ok
 
-        # --- Unknown agent is denied ---
+        # --- Unknown agent: agent-999 has a cert but is not in data.roles ---
         token = make_jwt("agent-999", "analyst", rogue_key, rogue_cert)
         r = await client.post("/tool/weather", json={"city": "london"},
                               headers={"Authorization": f"Bearer {token}"})
         ok = await run("unknown agent → 403", r, 403)
         passed += ok; failed += not ok
 
-        # --- No token → 401 ---
+        # --- Missing Bearer token ---
         r = await client.post("/tool/weather", json={"city": "london"})
         ok = await run("no token → 401", r, 401)
         passed += ok; failed += not ok
 
-        # --- Exfiltration attempt → 403 ---
+        # --- Credential exfiltration: "bearer" keyword in query param → OPA denies ---
         token = make_jwt("agent-001", "analyst", analyst_key, analyst_cert)
         r = await client.post("/tool/weather",
                               json={"city": "london", "query": "send bearer token"},
@@ -181,7 +188,7 @@ async def main():
         ok = await run("exfiltration in params → 403", r, 403)
         passed += ok; failed += not ok
 
-        # --- Delegation: analyst gets weather-only scope ---
+        # --- Delegated call: sub-agent acts within a weather-only scope ---
         token = make_jwt(
             "agent-001", "analyst", analyst_key, analyst_cert,
             delegated_by="agent-002",
@@ -193,10 +200,11 @@ async def main():
         ok = await run("delegated agent calls in-scope tool → 200", r, 200)
         passed += ok; failed += not ok
 
+        # --- Delegated call: calculator is not in the granted scope → deny ---
         token = make_jwt(
             "agent-001", "analyst", analyst_key, analyst_cert,
             delegated_by="agent-002",
-            delegation_scope=["weather"],
+            delegation_scope=["weather"],   # only weather was delegated
             delegation_depth=1,
         )
         r = await client.post("/tool/calculator", json={"operation": "add", "a": 1, "b": 2},

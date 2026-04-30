@@ -32,6 +32,7 @@ ALLOW_ENDPOINT = f"{OPA_URL}/v1/data/authz/allow"
 # ---------------------------------------------------------------------------
 
 def make_test_cert(agent_id: str):
+    """Self-signed cert — gives us a real EC key pair to sign delegation tokens with."""
     key = generate_private_key(SECP256R1())
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
@@ -51,6 +52,7 @@ def make_test_cert(agent_id: str):
 
 
 def ask_opa(input_data: dict) -> bool:
+    """POST input to OPA and return the allow decision."""
     r = httpx.post(ALLOW_ENDPOINT, json={"input": input_data})
     r.raise_for_status()
     return r.json().get("result", False)
@@ -68,40 +70,42 @@ def run(desc: str, input_data: dict, expected: bool):
 def main():
     print(f"OPA at {OPA_URL}\n")
 
-    # Supervisor = agent-002 (role: supervisor, allowed: weather + calculator)
+    # Supervisor = agent-002 (role: supervisor, allowed_tools: weather + calculator per data.json)
     sup_key_pem, sup_cert_pem = make_test_cert("agent-002")
     delegator = Delegator("agent-002", sup_key_pem, sup_cert_pem)
 
-    # Sub-agent = agent-001 (role: analyst)
+    # Sub-agent = agent-001 (role: analyst) — the supervisor delegates a narrower scope to it
     SUB_ID = "agent-001"
     SUB_ROLE = "analyst"
 
     passed = failed = 0
 
-    # --- Happy path ---
+    # --- Happy path: sub-agent calls a tool inside BOTH its role scope AND delegation scope ---
+    # OPA allow rule (delegated): role has weather AND delegation_scope has weather → allow
     token = delegator.delegate(SUB_ID, scope=["weather"], supervisor_allowed_tools=["weather", "calculator"])
-    claims = delegator.verify(token)
+    claims = delegator.verify(token)   # also validates the token locally before sending to OPA
 
     ok = run(
         "sub-agent can call tool within its role AND delegation scope",
         {
             "agent_id": SUB_ID, "role": SUB_ROLE, "tool": "weather",
             "delegated_by": claims["delegated_by"],
-            "delegation_scope": claims["delegation_scope"],
-            "delegation_depth": claims["delegation_depth"],
+            "delegation_scope": claims["delegation_scope"],   # ["weather"]
+            "delegation_depth": claims["delegation_depth"],   # 1
             "params": {},
         },
         True,
     )
     passed += ok; failed += not ok
 
-    # --- Tool outside delegation scope (calculator not in scope) ---
+    # --- Tool is in role scope but NOT in delegation scope → deny ---
+    # The analyst role allows calculator, but supervisor only delegated weather
     ok = run(
         "sub-agent CANNOT call tool outside delegation scope (calculator)",
         {
             "agent_id": SUB_ID, "role": SUB_ROLE, "tool": "calculator",
             "delegated_by": claims["delegated_by"],
-            "delegation_scope": claims["delegation_scope"],  # only ["weather"]
+            "delegation_scope": claims["delegation_scope"],   # only ["weather"]
             "delegation_depth": claims["delegation_depth"],
             "params": {},
         },
@@ -109,7 +113,7 @@ def main():
     )
     passed += ok; failed += not ok
 
-    # --- Tool outside role entirely (admin) ---
+    # --- Tool not in role scope at all → deny (admin requires admin role) ---
     ok = run(
         "sub-agent CANNOT call admin (not in role or delegation scope)",
         {
@@ -123,7 +127,8 @@ def main():
     )
     passed += ok; failed += not ok
 
-    # --- Delegation depth exceeded ---
+    # --- Depth too deep → deny even if tool is in scope ---
+    # OPA rule requires delegation_depth <= 2; 3 is beyond the limit
     ok = run(
         "delegation depth > 2 is denied",
         {
@@ -137,8 +142,10 @@ def main():
     )
     passed += ok; failed += not ok
 
-    # --- Supervisor cannot over-scope ---
+    # --- Python-side guardrails: checked before the token is even issued ---
     print("\n  Delegator guardrails (Python-side, before OPA):")
+
+    # Supervisor cannot delegate "admin" because it doesn't have admin in its allowed tools
     try:
         delegator.delegate(SUB_ID, scope=["admin"], supervisor_allowed_tools=["weather", "calculator"])
         print("  FAIL  supervisor should not be able to delegate 'admin'")
@@ -147,6 +154,7 @@ def main():
         print(f"  PASS  over-scope blocked: {e}")
         passed += 1
 
+    # Delegation at MAX_DELEGATION_DEPTH cannot go further
     try:
         delegator.delegate(SUB_ID, scope=["weather"], supervisor_allowed_tools=["weather"],
                            current_depth=MAX_DELEGATION_DEPTH)

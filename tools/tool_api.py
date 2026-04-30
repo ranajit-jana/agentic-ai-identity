@@ -11,6 +11,8 @@ Run:
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+# The tool API has no auth — it trusts the gateway to enforce identity and policy.
+# In production you'd add network-level controls so only the gateway can reach this service.
 app = FastAPI(title="Tool API", version="1.0.0")
 
 
@@ -54,11 +56,12 @@ class AdminResponse(BaseModel):
 
 @app.post("/tool/weather", response_model=WeatherResponse)
 def weather(req: WeatherRequest):
-    # Stubbed — returns dummy data so we can focus on the auth layer
+    # Stubbed — returns hardcoded data so we can focus on the identity/auth layer.
+    # In a real system this would call a weather API.
     stubs = {
-        "london":  {"temperature_c": 12.0, "condition": "cloudy"},
-        "delhi":   {"temperature_c": 38.0, "condition": "sunny"},
-        "new york":{"temperature_c": 22.0, "condition": "partly cloudy"},
+        "london":   {"temperature_c": 12.0, "condition": "cloudy"},
+        "delhi":    {"temperature_c": 38.0, "condition": "sunny"},
+        "new york": {"temperature_c": 22.0, "condition": "partly cloudy"},
     }
     data = stubs.get(req.city.lower(), {"temperature_c": 20.0, "condition": "unknown"})
     return WeatherResponse(city=req.city, **data)
@@ -70,6 +73,7 @@ def calculator(req: CalculatorRequest):
         "add":      req.a + req.b,
         "subtract": req.a - req.b,
         "multiply": req.a * req.b,
+        # Divide by zero returns NaN rather than raising — let the caller decide how to handle
         "divide":   req.a / req.b if req.b != 0 else float("nan"),
     }
     if req.operation not in ops:
@@ -80,7 +84,8 @@ def calculator(req: CalculatorRequest):
 
 @app.post("/tool/admin", response_model=AdminResponse)
 def admin(req: AdminRequest):
-    # Sensitive tool — only privileged agents should reach this (enforced in Phase 4)
+    # Sensitive tool — only privileged agents (role=admin) should reach this endpoint.
+    # The gateway + OPA enforce that; the tool itself doesn't check identity.
     actions = {
         "list_agents":  "returned agent roster",
         "revoke_cert":  "cert revocation queued",
