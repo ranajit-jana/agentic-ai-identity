@@ -38,6 +38,30 @@ STEP_CA_FINGERPRINT=a3f1...  ← must match output of:
 step certificate fingerprint /home/step/certs/root_ca.crt
 ```
 
+### 2.3 Chain of Trust
+
+The chain of trust is the **cryptographic lineage** that lets any verifier accept a cert it has never seen before. Each level is vouched for by the one above it via a digital signature:
+
+```
+root_ca.crt        ← trusted because its SHA-256 fingerprint is pinned in .env
+     │ (signs)
+     ▼
+intermediate_ca.crt ← trusted because root signed it
+     │ (signs)
+     ▼
+agent.crt           ← trusted because intermediate signed it
+```
+
+A verifier (the gateway) checks three things in sequence:
+
+1. Was `agent.crt` signed by `intermediate_ca.crt`?
+2. Was `intermediate_ca.crt` signed by `root_ca.crt`?
+3. Does `root_ca.crt`'s fingerprint match the pinned value?
+
+If all three pass, the cert is trusted — without the gateway ever having seen that specific `agent.crt` before. Trust flows **downward**, one signature at a time.
+
+The root CA's private key (`ca-data/secrets/root_ca_key`) is the most sensitive file in the system. Compromising it breaks the entire chain. In production it would be kept offline; here it lives in `ca-data/secrets/` which is git-ignored.
+
 ---
 
 ## 3. Provisioners — How Step CA Knows Who to Trust
@@ -185,6 +209,40 @@ docker-compose up step-ca
 
 Agents sign their messages with their private key and embed the cert chain in each message (`x5c` field). Recipients verify the chain against `ca.crt` before passing any content to the LLM. See [identity/signer.py](identity/signer.py).
 
+### 6.1 Circle of Trust
+
+The circle of trust is the **runtime membership boundary** — which agents are allowed to call which other agents or tools. It is not about cryptographic lineage; it is about **policy**.
+
+Where the chain of trust asks *"is this cert authentic?"*, the circle of trust asks *"is this agent allowed to do this?"*
+
+The circle is enforced in three layers in this project:
+
+**OPA policy** (`policy/policy.rego` + `policy/data.json`) — maps agent identities (the CN from their leaf cert) to allowed tools:
+
+```
+agent-001 → weather, calculator   ✓ inside the circle
+agent-001 → admin endpoint        ✗ outside the circle → denied
+```
+
+**Gateway auth** (`gateway/auth.py`) — on every inbound request, verifies the `x5c` cert chain (chain of trust), extracts the CN, then asks OPA whether that CN is in the circle for the requested tool. Both checks must pass.
+
+**Delegation** (`identity/delegator.py`) — a supervisor can delegate a subset of its permissions to a sub-agent. The sub-agent's circle is always a **strict subset** of the delegator's — delegation can narrow the circle but never expand it.
+
+```
+Supervisor (weather, calculator, admin)
+  └── delegates to Sub-agent (weather only)
+        └── Sub-agent circle = {weather}   ← cannot self-elevate to admin
+```
+
+| | Chain of Trust | Circle of Trust |
+|---|---|---|
+| **Question** | Is this cert cryptographically authentic? | Is this agent allowed to do this? |
+| **Enforced by** | X.509 signatures + fingerprint pin | OPA policy + gateway auth |
+| **Static or dynamic** | Static — set at cert issuance | Dynamic — policy can change at runtime |
+| **Lives in** | `ca-data/certs/`, `.certs/` | `policy/policy.rego`, `policy/data.json` |
+
+The chain of trust proves **who you are**. The circle of trust decides **what you're allowed to do**.
+
 ---
 
 ## 7. The `iss` vs `kid` Distinction — A Critical Bug
@@ -315,3 +373,76 @@ ca.json (Step CA config)
 ```
 
 After bootstrap, the agent uses its cert for mTLS on every request and renews automatically before it expires.
+
+---
+
+## 10. How the PKI Was Created in the First Place
+
+### Step 1 — Docker Compose bootstrapped Step CA automatically
+
+When you run `docker compose up step-ca` for the **first time**, the `smallstep/step-ca` container detects that `./ca-data` (mounted at `/home/step`) is empty and runs `step ca init` automatically using these env vars from `docker-compose.yml`:
+
+```yaml
+DOCKER_STEPCA_INIT_NAME: AgentCA
+DOCKER_STEPCA_INIT_DNS_NAMES: localhost,step-ca
+DOCKER_STEPCA_INIT_PASSWORD: ${STEP_CA_PASSWORD:-changeme}
+```
+
+That single first-run init generates **all three levels** in one shot:
+
+| File | What it is | Where |
+|---|---|---|
+| `root_ca.crt` | Self-signed root, valid 10 years | `ca-data/certs/root_ca.crt` |
+| `root_ca_key` | Root CA private key (encrypted) | `ca-data/secrets/root_ca_key` |
+| `intermediate_ca.crt` | Signed by root, valid 10 years | `ca-data/certs/intermediate_ca.crt` |
+| `intermediate_ca_key` | Intermediate CA private key (encrypted) | `ca-data/secrets/intermediate_ca_key` |
+| `ca.json` | Runtime config — the CA server reads this | `ca-data/config/ca.json` |
+
+The `ca-data/` directory is a Docker volume bind mount — so these files survive container restarts. The CA hierarchy is created exactly once and persisted on disk.
+
+### Step 2 — JWK provisioner key pair was also generated at init time
+
+Inside `ca-data/config/ca.json`, Step CA init also generates a **JWK provisioner** key pair:
+- **Public key** → stored in `authority.provisioners[].key` (the EC P-256 `x`/`y` coords)
+- **Private key** → encrypted as JWE and stored in `encryptedKey` in the same file
+
+This provisioner is what allows agents to prove identity and request leaf certs.
+
+### Step 3 — Leaf certs are issued at runtime (not at init)
+
+Every time an agent calls `CertManager.bootstrap()` in `identity/refresher.py`, it:
+1. Decrypts the provisioner private key from `ca.json` (the JWE blob — see Section 8)
+2. Mints a short-lived JWT (OTT) signed with that key
+3. Posts a CSR + OTT to Step CA's `/1.0/sign` endpoint
+4. Step CA signs the CSR with the **intermediate CA** and returns the leaf cert
+
+The leaf cert lands in `.certs/agent.crt` with a 1-hour TTL and auto-renews via the loop in Section 5.
+
+```
+docker compose up step-ca   ← first run only
+       │
+       │  ca-data/ is empty → step ca init runs automatically
+       ▼
+  root_ca.crt          (self-signed, O=AgentCA, 10-year validity)
+  root_ca_key          (encrypted EC private key)
+  intermediate_ca.crt  (signed by root, 10-year validity)
+  intermediate_ca_key  (encrypted EC private key)
+  ca.json              (provisioner JWK embedded as encryptedKey)
+       │
+       │  persisted to disk via bind mount — created once, reused forever
+       ▼
+  docker compose up (subsequent runs)
+       │
+       │  ca-data/ already exists → Step CA skips init, starts serving
+       ▼
+  CertManager.bootstrap()  (runtime, per agent)
+       │
+       ├─ decrypt encryptedKey → provisioner private key
+       ├─ mint OTT (JWT signed with provisioner key)
+       └─ POST /1.0/sign → leaf cert signed by intermediate CA
+              │
+              ▼
+         .certs/agent.crt   (1-hour TTL, renewed automatically)
+```
+
+**In short:** `root_ca.crt` and `intermediate_ca.crt` were created automatically by the Step CA Docker container on its very first start. You never ran `openssl` manually — Step CA's init routine did all of it.
