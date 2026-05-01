@@ -10,6 +10,33 @@ The two core ideas it is built on:
 
 2. **Automated issuance over a REST API.** The server exposes a small HTTPS API (`/1.0/sign`, `/1.0/renew`, `/health`, etc.) so software can request certs without human involvement.
 
+### 1.1 Step CA vs OpenSSL — What Is the Relationship?
+
+These are two very different tools that operate at different layers of the same stack.
+
+**OpenSSL** is a low-level cryptographic library and CLI toolkit. It gives you raw primitives: generate a key, sign a CSR, create a cert, verify a chain. You wire everything together yourself with shell commands. Before tools like Step CA existed, running a private CA meant a sequence of manual `openssl` commands every time you needed a cert.
+
+**Step CA** is a CA *server* built on top of Go's standard crypto library (`crypto/tls`, `crypto/x509`, `crypto/ecdsa`). It does not call OpenSSL internally — Go has its own independent implementations of the same algorithms and standards. But it produces and consumes the exact same X.509 cert format that OpenSSL produces, because both implement the same RFCs.
+
+```
+OpenSSL                             Step CA
+────────────────────────────────    ──────────────────────────────────────
+C library + CLI                     Go server with REST API
+Manual — you run commands           Automated — software calls the API
+No API, no lifecycle management     Provisioners, renewal, audit log
+Certs valid as long as you set      Short-lived certs, no revocation list
+You build the CA workflow           CA workflow is built in
+```
+
+**The relationship in practice:**
+
+1. **Interoperability** — certs issued by Step CA are standard X.509. You can inspect them with `openssl x509 -text`, verify chain with `openssl verify`, or use them in nginx/curl/any TLS library.
+2. **OpenSSL as a diagnostic tool** — this project uses `openssl x509` to inspect the certs on disk (e.g. checking `Signature Algorithm`, `notAfter`).
+3. **Same algorithms, different implementations** — when Step CA signs a cert with ECDSA P-256, it produces the same ASN.1 structure that `openssl req -newkey ec` would produce.
+4. **You could replicate Step CA with OpenSSL commands** — `openssl genrsa`, `openssl req`, `openssl ca` — but you would have to manage the serial numbers, CRL, key storage, and renewal logic yourself.
+
+In short: OpenSSL is the Swiss Army knife for individual crypto operations. Step CA is an automated CA server that uses the same underlying cryptographic standards but handles the entire cert lifecycle for you.
+
 ---
 
 ## 2. PKI Primer (what Step CA is built on)
@@ -61,6 +88,67 @@ A verifier (the gateway) checks three things in sequence:
 If all three pass, the cert is trusted — without the gateway ever having seen that specific `agent.crt` before. Trust flows **downward**, one signature at a time.
 
 The root CA's private key (`ca-data/secrets/root_ca_key`) is the most sensitive file in the system. Compromising it breaks the entire chain. In production it would be kept offline; here it lives in `ca-data/secrets/` which is git-ignored.
+
+### 2.4 Signing Algorithms
+
+Signing algorithms appear in three distinct contexts in Step CA. Each context has its own set of supported algorithms.
+
+#### X.509 Certificate Signing (root → intermediate → leaf)
+
+The algorithm used when a CA key actually signs a certificate.
+
+| Algorithm | Key Type | Curve / Size | Notes |
+|---|---|---|---|
+| `ecdsa-with-SHA256` | EC | P-256 | **Default — used in this project** |
+| `ecdsa-with-SHA384` | EC | P-384 | |
+| `ecdsa-with-SHA512` | EC | P-521 | |
+| `sha256WithRSAEncryption` | RSA | 2048 / 3072 / 4096 | Legacy compat |
+| `sha384WithRSAEncryption` | RSA | 3072 / 4096 | |
+| `sha512WithRSAEncryption` | RSA | 4096 | |
+| `rsassaPss` (RSA-PSS) | RSA | 2048+ | Probabilistic; preferred over PKCS#1 |
+| `Ed25519` | EdDSA | 255-bit | Fastest verification; no curve choice |
+
+All three certs in this project use `ecdsa-with-SHA256` (EC P-256) — Step CA's default when no `--kty` flag is given at `step ca init` time.
+
+#### JWT / OTT Signing (JWK provisioner tokens)
+
+The algorithm the agent uses to sign the one-time token it sends to `/1.0/sign`.
+
+| Algorithm | Key Type | Notes |
+|---|---|---|
+| `ES256` | EC P-256 | **Used in this project** |
+| `ES384` | EC P-384 | |
+| `ES512` | EC P-521 | |
+| `RS256` / `RS384` / `RS512` | RSA PKCS#1 | |
+| `PS256` / `PS384` / `PS512` | RSA-PSS | Preferred over RS* |
+| `EdDSA` | Ed25519 | |
+
+Set by the `"alg"` field in the provisioner entry in `ca.json` and in the JWT `header.alg` field in `identity/refresher.py`.
+
+#### TLS Cipher Suites (Step CA's own HTTPS server)
+
+The algorithms Step CA uses for its own `/1.0/sign`, `/1.0/renew` endpoints. Configured under `tls.cipherSuites` in `ca.json`. This project uses:
+
+```json
+"TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256"
+"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+```
+
+Other supported suites: `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`, `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`. TLS 1.3 suites (`TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`) are always active — Go's TLS stack enables them automatically and they are not configurable.
+
+#### Summary for this project
+
+```
+Context                Algorithm              Reason
+───────────────────────────────────────────────────────────────────────
+Cert signing           ecdsa-with-SHA256      Step CA default (EC key at init)
+(all three levels)     EC P-256
+
+OTT / JWT signing      ES256 (ECDSA P-256)    Matches provisioner key type in ca.json
+
+Step CA TLS server     ECDHE-ECDSA-AES128-GCM Forward secrecy (ECDHE) +
+                       ECDHE-ECDSA-ChaCha20   authenticated encryption (AEAD)
+```
 
 ---
 
