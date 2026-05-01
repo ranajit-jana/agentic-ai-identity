@@ -1,0 +1,225 @@
+================================================================================
+  SETUP & RUNNING INSTRUCTIONS
+  Secure Agentic Tool Access — Identity + Policy + Injection Defense
+================================================================================
+
+
+--------------------------------------------------------------------------------
+  PREREQUISITES
+--------------------------------------------------------------------------------
+
+  1. Docker + Docker Compose  (https://docs.docker.com/get-docker/)
+  2. uv  (Python package manager)
+
+     curl -LsSf https://astral.sh/uv/install.sh | sh
+
+  3. Anthropic API key  (https://console.anthropic.com)
+  4. Langfuse account   (https://cloud.langfuse.com)  — free tier is fine
+
+
+--------------------------------------------------------------------------------
+  STEP 1 — Install Python dependencies
+--------------------------------------------------------------------------------
+
+  uv sync
+
+
+--------------------------------------------------------------------------------
+  STEP 2 — Configure environment
+--------------------------------------------------------------------------------
+
+  Edit .env and fill in the required values:
+
+    ANTHROPIC_API_KEY=sk-ant-...          # required — main agent LLM
+
+    LANGFUSE_PUBLIC_KEY=pk-lf-...         # required for tracing
+    LANGFUSE_SECRET_KEY=sk-lf-...         # required for tracing
+    LANGFUSE_BASE_URL=https://cloud.langfuse.com
+
+    TRACING_MODE=production               # "debug" for full gateway spans
+                                          # "production" for LLM + judge only
+
+    JUDGE_MODEL=llama3.2                  # local Ollama model for LLM judge
+                                          # options: llama3.2 (3B, default)
+                                          #          llama3.2:1b (fastest on CPU)
+                                          #          llama3.1:8b (better accuracy)
+
+  Everything else has working defaults and does not need to change for a demo run.
+
+
+--------------------------------------------------------------------------------
+  STEP 3 — Start Docker services
+--------------------------------------------------------------------------------
+
+  Starts OPA (policy engine) + Ollama (local LLM judge).
+  Step CA is NOT needed for demo mode — the agent generates throwaway certs
+  in-process. If you want real cert issuance, see FULL SETUP at the bottom.
+
+  On first run, ollama-pull automatically downloads the judge model (~2 GB).
+
+    docker compose up -d opa ollama
+
+  Watch the model download (takes a few minutes on first run):
+
+    docker compose logs -f ollama-pull
+
+  Wait until you see:  "success" or the ollama-pull container exits cleanly.
+
+  Verify services are up:
+
+    docker compose ps
+
+
+--------------------------------------------------------------------------------
+  STEP 4 — Start the Tool API
+--------------------------------------------------------------------------------
+
+  The tool API provides the weather, calculator, and admin endpoints.
+  Run it in a separate terminal and leave it running.
+
+    PYTHONPATH=. uv run uvicorn tools.tool_api:app --port 8000
+
+
+--------------------------------------------------------------------------------
+  STEP 5 — Run tests (recommended before the demo)
+--------------------------------------------------------------------------------
+
+  No-service tests — run these first, always:
+
+    PYTHONPATH=. uv run python scripts/test_security.py    # 56 checks
+    PYTHONPATH=. uv run python scripts/test_judge.py       # 12 checks (mocked Ollama)
+
+  OPA tests — needs docker compose up -d opa:
+
+    PYTHONPATH=. uv run python scripts/test_policy.py
+    PYTHONPATH=. uv run python scripts/test_delegation.py
+
+  Gateway tests — needs OPA + tool API running:
+
+    PYTHONPATH=. uv run python scripts/test_gateway.py
+
+
+--------------------------------------------------------------------------------
+  STEP 6 — Run the agent demo
+--------------------------------------------------------------------------------
+
+  Demo mode generates throwaway certs in-process — no Step CA needed.
+  Needs OPA + tool API running (Steps 3 and 4).
+
+    PYTHONPATH=. uv run python agent/agent.py --demo
+
+  What you will see:
+    - 3 scenarios: weather (allowed), calculator (allowed), admin (denied)
+    - Langfuse traces appear at cloud.langfuse.com → Traces
+    - Judge fires async on each task prompt; scores appear on the trace
+    - audit.jsonl is written in the project root
+
+  To run with full debug spans instead:
+
+    TRACING_MODE=debug PYTHONPATH=. uv run python agent/agent.py --demo
+
+  Malicious agent demo (shows 4 attack scenarios):
+
+    PYTHONPATH=. uv run python agent/supervisor.py --demo
+
+
+--------------------------------------------------------------------------------
+  STEP 7 — Run the gateway (optional, needed for real mode)
+--------------------------------------------------------------------------------
+
+  In a separate terminal:
+
+    PYTHONPATH=. uv run uvicorn gateway.gateway:app --port 8443
+
+
+--------------------------------------------------------------------------------
+  FULL SETUP — Real mode with Step CA
+--------------------------------------------------------------------------------
+
+  Use this for a production-like setup with real cert issuance.
+
+  1. Start ALL services (Step CA + OPA + Ollama):
+
+       docker compose up -d
+
+  2. Extract the provisioner key (ONE TIME ONLY — do this after first docker up):
+
+       PYTHONPATH=. uv run python scripts/extract_key.py
+
+     Copy the printed fingerprint into .env as STEP_CA_FINGERPRINT.
+
+  3. Start the tool API (separate terminal):
+
+       PYTHONPATH=. uv run uvicorn tools.tool_api:app --port 8000
+
+  4. Start the gateway (separate terminal):
+
+       PYTHONPATH=. uv run uvicorn gateway.gateway:app --port 8443
+
+  5. Run the agent (real mode — loads certs from .certs/):
+
+       PYTHONPATH=. uv run python agent/agent.py
+
+
+--------------------------------------------------------------------------------
+  CHANGING THE JUDGE MODEL
+--------------------------------------------------------------------------------
+
+  Edit .env:
+
+    JUDGE_MODEL=llama3.2        # 3B — default, good balance on CPU
+    JUDGE_MODEL=llama3.2:1b     # 1B — fastest on CPU (~2-4s per call)
+    JUDGE_MODEL=llama3.1:8b     # 8B — better accuracy, slower on CPU
+
+  Then restart the ollama-pull service to download the new model:
+
+    docker compose up -d ollama-pull
+
+  No code changes needed — the judge reads JUDGE_MODEL from .env at startup.
+
+
+--------------------------------------------------------------------------------
+  GPU ACCELERATION (optional, NVIDIA only)
+--------------------------------------------------------------------------------
+
+  1. Install nvidia-container-toolkit:
+     https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+
+  2. Uncomment the deploy block in docker-compose.yml under the ollama service:
+
+       deploy:
+         resources:
+           reservations:
+             devices:
+               - driver: nvidia
+                 count: all
+                 capabilities: [gpu]
+
+  3. Restart:
+
+       docker compose up -d ollama
+
+
+--------------------------------------------------------------------------------
+  USEFUL COMMANDS
+--------------------------------------------------------------------------------
+
+  Stop all services:
+    docker compose down
+
+  Free up model storage (removes downloaded models):
+    docker volume rm agentic-ai-identity_ollama_models
+
+  View audit log (last 20 entries):
+    tail -20 audit.jsonl | python -m json.tool
+
+  Check OPA is running:
+    curl http://localhost:8181/health
+
+  Check Ollama is running:
+    curl http://localhost:11434/api/tags
+
+  Check which models are downloaded:
+    docker compose exec ollama ollama list
+
+================================================================================

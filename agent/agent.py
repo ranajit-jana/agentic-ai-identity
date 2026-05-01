@@ -1,5 +1,5 @@
 """
-Phase 5 — LangGraph Agent with identity-gated tool access.
+LangGraph Agent with identity-gated tool access + Langfuse observability.
 
 Every tool call:
   1. Signs a fresh short-lived JWT (cert private key + x5c header)
@@ -7,16 +7,20 @@ Every tool call:
   3. Gateway verifies identity → asks OPA → forwards or 403
   4. The LLM never sees the JWT — the HTTP client layer handles it
 
-Modes:
+Observability modes (TRACING_MODE env var):
+  debug:      Full span tree in gateway + every LangGraph node traced via
+              callback handler. Passes X-Trace-Id header so gateway spans
+              nest under the same Langfuse trace.
+  production: LLM prompt + response only. Judge fires async on the task prompt
+              before the LLM runs it (jailbreak / social-engineering detection).
+
+Run modes:
   real  — loads certs from .certs/ (issued by Step CA), calls external gateway
-  demo  — generates throwaway certs, routes through in-process gateway (no Step CA / no server needed)
+  demo  — generates throwaway certs, routes through in-process gateway (no Step CA needed)
 
 Usage:
-    # real mode
-    PYTHONPATH=. uv run python agent/agent.py
-
-    # demo mode (no Step CA, no running gateway required)
-    PYTHONPATH=. uv run python agent/agent.py --demo
+    PYTHONPATH=. uv run python agent/agent.py          # real mode
+    PYTHONPATH=. uv run python agent/agent.py --demo   # demo mode
 """
 
 import argparse
@@ -44,6 +48,9 @@ from cryptography.hazmat.primitives.asymmetric.ec import SECP256R1, generate_pri
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.x509.oid import NameOID
 
+from observability import langfuse_client as lf
+from security.judge import evaluate_prompt
+
 load_dotenv()
 
 GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8443")
@@ -59,6 +66,9 @@ _key_pem:  bytes = b""
 # Shared HTTP client — real mode: plain AsyncClient pointing at GATEWAY_URL
 #                      demo mode: ASGITransport routes in-process (no network socket needed)
 _http_client: httpx.AsyncClient | None = None
+
+# Active Langfuse trace ID — set per task so gateway spans nest under the same trace
+_current_trace_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +107,19 @@ def _make_request_token() -> str:
 
 
 async def _call_gateway(tool_name: str, body: dict) -> dict:
-    """POST to gateway with a fresh signed JWT. JWT is never in LLM context."""
+    """POST to gateway with a fresh signed JWT.
+
+    X-Trace-Id is passed so the gateway can attach its spans (debug mode) and
+    the judge verdict (production mode) to the same Langfuse trace.
+    JWT is never in LLM context.
+    """
     assert _http_client, "call setup() first"
     token = _make_request_token()   # fresh token per call — no reuse
-    r = await _http_client.post(
-        f"/tool/{tool_name}",
-        json=body,
-        headers={"Authorization": f"Bearer {token}"},
-    )
+    headers = {"Authorization": f"Bearer {token}"}
+    if _current_trace_id:
+        # Gateway reads this to link its spans / judge scores to the agent's trace
+        headers["X-Trace-Id"] = _current_trace_id
+    r = await _http_client.post(f"/tool/{tool_name}", json=body, headers=headers)
     # Return structured error dict instead of raising — LLM can read it and explain
     if r.status_code == 403:
         return {"error": "access_denied", "detail": r.json().get("detail", "forbidden")}
@@ -236,7 +251,7 @@ async def setup(demo: bool = False) -> None:
         await mgr.bootstrap()
         asyncio.create_task(_keep_certs_fresh(mgr))
 
-    print(f"[agent] id={AGENT_ID}  role={AGENT_ROLE}  model={MODEL}\n")
+    print(f"[agent] id={AGENT_ID}  role={AGENT_ROLE}  model={MODEL}  tracing={lf.get_mode()}\n")
 
 
 async def _keep_certs_fresh(mgr):
@@ -255,13 +270,44 @@ async def _keep_certs_fresh(mgr):
 # ---------------------------------------------------------------------------
 
 async def run_task(task: str) -> str:
-    """Create a fresh ReAct agent and run one task."""
-    llm   = ChatAnthropic(model=MODEL, temperature=0)
+    """Create a fresh ReAct agent and run one task with Langfuse tracing."""
+    global _current_trace_id
+
+    # Create a Langfuse trace for this task — returns no-op stub when not configured
+    trace = lf.start_trace(
+        name=task[:80],   # truncate so UI is readable
+        input=task,
+        metadata={"agent_id": AGENT_ID, "role": AGENT_ROLE, "model": MODEL},
+    )
+    # Store trace ID globally so _call_gateway can forward it in X-Trace-Id header
+    _current_trace_id = trace.id
+
+    mode = lf.get_mode()
+
+    if mode == "production":
+        # Judge fires async before the LLM runs — catches jailbreaks in the task prompt.
+        # asyncio.create_task means this never blocks the LLM call.
+        asyncio.create_task(
+            evaluate_prompt(task, AGENT_ID, AGENT_ROLE, _current_trace_id)
+        )
+
+    llm = ChatAnthropic(model=MODEL, temperature=0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         # create_react_agent builds a ReAct loop: think → tool call → observe → think ...
         agent = create_react_agent(llm, tools=[get_weather, calculate, admin_action])
-    result = await agent.ainvoke({"messages": [{"role": "user", "content": task}]})
+
+    # Debug: attach callback handler so every LangGraph node is traced under this trace
+    config = {}
+    if mode == "debug":
+        handler = lf.get_callback_handler(trace_id=_current_trace_id)
+        if handler:
+            config = {"callbacks": [handler]}
+
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": task}]},
+        config,
+    )
     return result["messages"][-1].content
 
 
@@ -281,6 +327,9 @@ async def main(demo: bool) -> None:
         print(f"Task     : {task}")
         response = await run_task(task)
         print(f"Response : {response}\n")
+
+    # Flush buffered Langfuse events before the process exits
+    lf.flush()
 
 
 if __name__ == "__main__":

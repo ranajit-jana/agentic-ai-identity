@@ -34,6 +34,7 @@ def log(
     params: dict | None = None,
     injection_rules: list[str] | None = None,   # rule names that fired in the sanitizer
     detail: str = "",                            # "opa_deny", "injection_detected_in_tool_response", etc.
+    judge_verdict: dict | None = None,           # LLM judge verdict when present (production mode)
 ) -> None:
     """Write one audit entry. Never raises — logging must not break the request path."""
     try:
@@ -49,6 +50,8 @@ def log(
             "params_hash":      _hash(params or {}),
             "injection_rules":  injection_rules or None,
             "detail":           detail or None,
+            # Judge verdict embedded inline so the audit trail includes AI verdicts
+            "judge_verdict":    judge_verdict or None,
         }
         # Strip None values to keep log lines compact and easy to grep
         entry = {k: v for k, v in entry.items() if v is not None}

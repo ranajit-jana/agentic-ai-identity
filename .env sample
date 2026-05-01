@@ -1,0 +1,30 @@
+# Anthropic
+ANTHROPIC_API_KEY=sk-ant-..           # add your key here
+AGENT_MODEL=claude-sonnet-4-6
+
+# Step CA
+STEP_CA_URL=https://localhost:9000
+STEP_CA_PROVISIONER=admin
+STEP_CA_PASSWORD=changeme
+STEP_CA_FINGERPRINT=....
+
+# Agent
+AGENT_ID=agent-001
+AGENT_ROLE=analyst
+CERT_TTL=5m
+CERTS_DIR=.certs
+
+# OPA
+OPA_URL=http://localhost:8181
+
+# Gateway
+GATEWAY_URL=http://localhost:8443
+TOOL_API_URL=http://localhost:8000
+
+# Observability
+# TRACING_MODE: "debug" traces every gateway step (auth, OPA, tool, sanitizer)
+#               "production" traces only LLM prompt/response + fires LLM judge
+TRACING_MODE=production
+LANGFUSE_SECRET_KEY="sk-lf-.."
+LANGFUSE_PUBLIC_KEY="pk-lf-..."
+LANGFUSE_BASE_URL="https://cloud.langfuse.com"

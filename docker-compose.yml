@@ -1,4 +1,8 @@
 services:
+
+  # ---------------------------------------------------------------------------
+  # Step CA — issues short-lived X.509 certs to agents
+  # ---------------------------------------------------------------------------
   step-ca:
     image: smallstep/step-ca:latest
     environment:
@@ -16,6 +20,9 @@ services:
       timeout: 3s
       retries: 12
 
+  # ---------------------------------------------------------------------------
+  # OPA — policy engine for role-based tool access and agent trust map
+  # ---------------------------------------------------------------------------
   opa:
     image: openpolicyagent/opa:latest
     command: run --server --addr 0.0.0.0:8181 --watch --log-level info /policies
@@ -28,3 +35,60 @@ services:
       interval: 5s
       timeout: 3s
       retries: 6
+
+  # ---------------------------------------------------------------------------
+  # Ollama — local LLM server for the LLM-as-a-judge (no external API calls)
+  #
+  # Models are stored in a named volume so they survive container restarts
+  # without re-downloading (llama3.2 is ~2 GB).
+  #
+  # CPU-only by default. To enable NVIDIA GPU acceleration, uncomment the
+  # `deploy` block below and ensure nvidia-container-toolkit is installed:
+  #   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      # Named volume persists downloaded models between restarts
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    # Uncomment for NVIDIA GPU acceleration:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      # /api/tags lists downloaded models — a clean 200 means Ollama is ready
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # ---------------------------------------------------------------------------
+  # Ollama model init — pulls the judge model once after Ollama is healthy.
+  # Runs every `docker compose up` but ollama pull is idempotent (skips if
+  # the model is already in the volume).
+  # Change JUDGE_MODEL in .env to swap models without touching this file.
+  # ---------------------------------------------------------------------------
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    # OLLAMA_HOST tells the Ollama CLI to connect to the ollama service
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${JUDGE_MODEL:-llama3.2}"]
+    restart: "no"   # one-shot — exits after the pull completes
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  # Persists Ollama model weights between container restarts.
+  # To free disk space: docker volume rm agentic-ai-identity_ollama_models
+  ollama_models:
