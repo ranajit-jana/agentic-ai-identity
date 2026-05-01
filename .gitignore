@@ -7,3 +7,6 @@ __pycache__/
 ca-data/
 .certs/
 identity/provisioner.json
+
+# Runtime data — not source
+audit.jsonl

@@ -63,6 +63,10 @@ MODEL       = os.getenv("AGENT_MODEL", "claude-sonnet-4-6")
 _cert_pem: bytes = b""
 _key_pem:  bytes = b""
 
+# Admin identity certs — demo mode only, agent-003 (admin role)
+_admin_cert_pem: bytes = b""
+_admin_key_pem:  bytes = b""
+
 # Shared HTTP client — real mode: plain AsyncClient pointing at GATEWAY_URL
 #                      demo mode: ASGITransport routes in-process (no network socket needed)
 _http_client: httpx.AsyncClient | None = None
@@ -129,6 +133,49 @@ async def _call_gateway(tool_name: str, body: dict) -> dict:
     return r.json()
 
 
+def _make_admin_request_token() -> str:
+    """Sign a 60-second JWT for agent-003 (admin role) using the demo admin cert."""
+    private_key = load_pem_private_key(_admin_key_pem, password=None)
+    cert        = x509.load_pem_x509_certificate(_admin_cert_pem)
+    cert_der_b64 = base64.b64encode(
+        cert.public_bytes(serialization.Encoding.DER)
+    ).decode()
+    now = int(__import__("time").time())
+    return __import__("jwt").encode(
+        {
+            "agent_id":         "agent-003",
+            "role":             "admin",
+            "delegated_by":     "",
+            "delegation_scope": [],
+            "delegation_depth": 0,
+            "aud":              "gateway",
+            "iat":              now,
+            "exp":              now + 60,
+            "jti":              str(uuid.uuid4()),
+        },
+        private_key,
+        algorithm="ES256",
+        headers={"x5c": [cert_der_b64]},
+    )
+
+
+async def _call_gateway_admin(tool_name: str, body: dict) -> dict:
+    """POST to gateway as agent-003 (admin role). Used by the parallel admin flow."""
+    assert _http_client, "call setup() first"
+    token = _make_admin_request_token()
+    r = await _http_client.post(
+        f"/tool/{tool_name}",
+        json=body,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    if r.status_code == 403:
+        return {"error": "access_denied", "detail": r.json().get("detail", "forbidden")}
+    if r.status_code == 401:
+        return {"error": "auth_failed", "detail": r.json().get("detail", "unauthorized")}
+    r.raise_for_status()
+    return r.json()
+
+
 # ---------------------------------------------------------------------------
 # LangGraph tools — async, thin wrappers over _call_gateway
 # The LLM only sees docstrings and return values, never the JWT
@@ -162,11 +209,12 @@ async def admin_action(action: str) -> dict:
 # Demo cert setup — no Step CA needed
 # ---------------------------------------------------------------------------
 
-def _make_demo_pki() -> tuple[bytes, bytes, bytes]:
-    """Generate a throwaway CA + agent cert signed by it.
+def _make_demo_pki() -> tuple[bytes, bytes, bytes, bytes, bytes]:
+    """Generate a throwaway CA + analyst cert (agent-001) + admin cert (agent-003).
 
     Used in demo mode so we can run a full end-to-end flow without
     setting up Step CA. Certs expire in 1 hour and are never saved to disk.
+    Returns: (analyst_cert, analyst_key, ca_cert, admin_cert, admin_key)
     """
     ca_key = generate_private_key(SECP256R1())
     now    = datetime.datetime.now(datetime.timezone.utc)
@@ -184,30 +232,37 @@ def _make_demo_pki() -> tuple[bytes, bytes, bytes]:
         .sign(ca_key, hashes.SHA256())
     )
 
-    # Agent cert signed by demo CA — CN must match AGENT_ID (gateway checks this)
-    agent_key  = generate_private_key(SECP256R1())
-    agent_cert = (
-        x509.CertificateBuilder()
-        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, AGENT_ID)]))
-        .issuer_name(ca_cert.issuer)
-        .public_key(agent_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(hours=1))
-        .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName(AGENT_ID)]), critical=False
+    def _agent_cert(cn: str):
+        key = generate_private_key(SECP256R1())
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+            .issuer_name(ca_cert.issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now)
+            .not_valid_after(now + datetime.timedelta(hours=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
+            .sign(ca_key, hashes.SHA256())
         )
-        .sign(ca_key, hashes.SHA256())
-    )
+        return (
+            cert.public_bytes(serialization.Encoding.PEM),
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            ),
+        )
+
+    analyst_cert_pem, analyst_key_pem = _agent_cert(AGENT_ID)   # agent-001
+    admin_cert_pem,   admin_key_pem   = _agent_cert("agent-003") # admin role in OPA data
 
     return (
-        agent_cert.public_bytes(serialization.Encoding.PEM),
-        agent_key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        ),
+        analyst_cert_pem,
+        analyst_key_pem,
         ca_cert.public_bytes(serialization.Encoding.PEM),
+        admin_cert_pem,
+        admin_key_pem,
     )
 
 
@@ -216,11 +271,11 @@ def _make_demo_pki() -> tuple[bytes, bytes, bytes]:
 # ---------------------------------------------------------------------------
 
 async def setup(demo: bool = False) -> None:
-    global _cert_pem, _key_pem, _http_client
+    global _cert_pem, _key_pem, _admin_cert_pem, _admin_key_pem, _http_client
 
     if demo:
         print("[agent] demo mode — generating throwaway certs, routing in-process")
-        _cert_pem, _key_pem, ca_pem = _make_demo_pki()
+        _cert_pem, _key_pem, ca_pem, _admin_cert_pem, _admin_key_pem = _make_demo_pki()
 
         # Patch gateway module globals so it trusts our demo CA
         # This works because demo mode runs everything in the same Python process
@@ -235,21 +290,15 @@ async def setup(demo: bool = False) -> None:
             base_url="http://test",
         )
     else:
-        cert_path = CERTS_DIR / "agent.crt"
-        if not cert_path.exists():
-            sys.exit(
-                f"[agent] {cert_path} not found.\n"
-                "  Bootstrap Step CA first, or run with --demo."
-            )
-        _cert_pem    = cert_path.read_bytes()
-        _key_pem     = (CERTS_DIR / "agent.key").read_bytes()
-        _http_client = httpx.AsyncClient(base_url=GATEWAY_URL, timeout=10.0)
-
-        # Start background cert renewal — keeps certs fresh without restarting the agent
+        # Bootstrap always issues a fresh cert and writes it to .certs/ before we read it
         from identity.refresher import CertManager
         mgr = CertManager.from_env()
         await mgr.bootstrap()
         asyncio.create_task(_keep_certs_fresh(mgr))
+
+        _cert_pem    = (CERTS_DIR / "agent.crt").read_bytes()
+        _key_pem     = (CERTS_DIR / "agent.key").read_bytes()
+        _http_client = httpx.AsyncClient(base_url=GATEWAY_URL, timeout=10.0)
 
     print(f"[agent] id={AGENT_ID}  role={AGENT_ROLE}  model={MODEL}  tracing={lf.get_mode()}\n")
 
@@ -321,12 +370,24 @@ async def main(demo: bool) -> None:
         ("Denied   — admin",      "List all agents in the system using the admin action."),
     ]
 
-    for label, task in scenarios:
+    async def analyst_flow():
+        for label, task in scenarios:
+            print(f"{'='*60}")
+            print(f"Scenario : {label}")
+            print(f"Task     : {task}")
+            response = await run_task(task)
+            print(f"Response : {response}\n")
+
+    async def admin_flow():
+        """Parallel flow: agent-003 (admin role) calls admin directly — should succeed."""
+        result = await _call_gateway_admin("admin", {"action": "list_agents"})
         print(f"{'='*60}")
-        print(f"Scenario : {label}")
-        print(f"Task     : {task}")
-        response = await run_task(task)
-        print(f"Response : {response}\n")
+        print("Parallel : Allowed   — admin (agent-003, admin role)")
+        print(f"Response : {result}\n")
+
+    # Run analyst scenarios and the admin parallel flow concurrently.
+    # The direct gateway call (no LLM) completes quickly; LLM scenarios follow.
+    await asyncio.gather(analyst_flow(), admin_flow())
 
     # Flush buffered Langfuse events before the process exits
     lf.flush()

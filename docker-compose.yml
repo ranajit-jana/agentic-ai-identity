@@ -62,8 +62,8 @@ services:
     #           count: all
     #           capabilities: [gpu]
     healthcheck:
-      # /api/tags lists downloaded models — a clean 200 means Ollama is ready
-      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      # ollama list queries the running server — exits 0 when ready
+      test: ["CMD", "ollama", "list"]
       interval: 10s
       timeout: 5s
       retries: 12

@@ -127,11 +127,13 @@ class CertManager:
         provisioner_jwk: dict,
         ca_fingerprint: str,
         certs_dir: Path = Path(".certs"),
+        provisioner_name: str = "admin",
     ):
         self.ca_url = ca_url.rstrip("/")
         self.agent_id = agent_id
         self.provisioner_jwk = provisioner_jwk    # decrypted provisioner key from ca.json
         self.ca_fingerprint = ca_fingerprint      # SHA-256 of CA root cert — prevents MITM on first fetch
+        self.provisioner_name = provisioner_name
         self.certs_dir = Path(certs_dir)
         self.certs_dir.mkdir(exist_ok=True)
         self._cert: _Cert | None = None
@@ -158,6 +160,7 @@ class CertManager:
             provisioner_jwk=json.loads(provisioner_path.read_text()),
             ca_fingerprint=os.environ["STEP_CA_FINGERPRINT"],
             certs_dir=Path(os.getenv("CERTS_DIR", ".certs")),
+            provisioner_name=os.getenv("STEP_CA_PROVISIONER", "admin"),
         )
 
     # ------------------------------------------------------------------
@@ -215,7 +218,7 @@ class CertManager:
                 "aud": f"{self.ca_url}/1.0/sign",   # token is scoped to this endpoint only
                 "exp": now + 60,
                 "iat": now,
-                "iss": self.provisioner_jwk["kid"],  # provisioner identity
+                "iss": self.provisioner_name,         # provisioner name (not kid)
                 "jti": str(uuid.uuid4()),             # unique — prevents OTT reuse
                 "nbf": now,
                 "sans": [self.agent_id],              # requested SAN in the cert
