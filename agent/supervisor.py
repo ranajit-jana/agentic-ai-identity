@@ -16,12 +16,19 @@ Real mode (requires Step CA + running gateway):
     PYTHONPATH=. uv run python agent/supervisor.py
 """
 
+import os
+import sys
+
+# When this script is run directly (python agent/supervisor.py), Python adds
+# the agent/ directory to sys.path[0]. That causes `from agent.schemas import …`
+# in gateway.py to find agent/agent.py instead of the agent/ package.
+# Inserting the project root first ensures 'agent' resolves to the package.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
 import asyncio
 import base64
 import datetime
-import os
-import sys
 import uuid
 import warnings
 from pathlib import Path

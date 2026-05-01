@@ -61,7 +61,7 @@
 
   Watch the model download (takes a few minutes on first run):
 
-    docker compose logs -f ollama-pull
+    docker compose logs -f ollama
 
   Wait until you see:  "success" or the ollama-pull container exits cleanly.
 
@@ -159,6 +159,10 @@
   5. Run the agent (real mode — loads certs from .certs/):
 
        PYTHONPATH=. uv run python agent/agent.py
+
+     NOTE: if you see ".certs/agent.crt not found", Step CA has not issued a cert
+     yet. Make sure steps 1-2 above completed successfully, then try again.
+     For a quick run without Step CA, use --demo instead.
 
 
 --------------------------------------------------------------------------------
