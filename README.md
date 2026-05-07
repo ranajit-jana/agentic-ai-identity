@@ -38,6 +38,65 @@ In this project: every agent's cert contains `spiffe://agents.local/agent/agent-
 
 ---
 
+#### SPIRE vs Step CA — What Is Different and Why It Matters
+
+**SPIRE** (SPIFFE Runtime Environment) is the reference implementation of SPIFFE. It is the production-grade server+agent system you would run in a real Kubernetes or cloud environment. **Step CA** is what this project uses — a lightweight CA that is SPIFFE-*compatible* but is a much simpler tool.
+
+The conceptual difference comes down to one word: **attestation**.
+
+> **Attestation** means proving *who you are* using platform-level evidence rather than a shared secret. The SPIRE Agent running on a node looks at kernel-level information (process ID, binary hash, Kubernetes service account token, AWS instance identity document) to cryptographically verify that the process asking for an SVID is actually the workload it claims to be — without that workload needing to know any password or key in advance.
+
+With Step CA (this project), the agent proves its identity by signing an OTT (One-Time Token) with the provisioner's private key. That provisioner key lives in `identity/provisioner.json`. Anyone who obtains that file can impersonate any agent.
+
+With SPIRE, there is no provisioner key. The SPIRE Agent running on the host attests the workload automatically — the workload just asks for its SVID over a local Unix socket and receives it.
+
+**How the bootstrap code would look different:**
+
+Current implementation with Step CA (`identity/refresher.py`):
+```python
+# Agent must hold a secret (provisioner key) to prove it can request a cert
+# This key lives in identity/provisioner.json — a shared secret
+
+mgr = CertManager.from_env()   # loads provisioner JWK from disk
+await mgr.bootstrap()          # POST /1.0/sign with signed OTT
+                               # Step CA trusts: "you know the provisioner key"
+```
+
+Equivalent with SPIRE (using the `pyspiffe` library):
+```python
+# No secret needed — SPIRE Agent on the host attests the workload
+# via process metadata, binary hash, or Kubernetes service account
+
+from spiffe import WorkloadApiClient
+
+client = WorkloadApiClient("unix:///run/spire/sockets/agent.sock")
+svid = client.fetch_x509_svid()   # blocks until SPIRE Agent attests this process
+
+cert_pem = svid.cert_chain_pem    # already has spiffe://... URI SAN
+key_pem  = svid.private_key_pem   # SPIRE generated the key inside the agent
+                                  # SPIRE trusts: "you are pod X in namespace Y
+                                  #               as proven by your k8s service account"
+```
+
+The calling code in `agent.py` and `gateway/auth.py` would be **identical** — same SPIFFE URI SANs, same cert format, same JWT signing, same x5c verification. Only the bootstrap mechanism changes.
+
+**Side-by-side comparison:**
+
+| | Step CA (this project) | SPIRE (production) |
+|---|---|---|
+| **How identity is proven** | Agent signs OTT with shared provisioner key | Platform attestation (k8s service account, AWS IMDSv2, process UID) |
+| **Shared secret required?** | Yes — `identity/provisioner.json` | No shared secrets |
+| **SVID issuance API** | Custom HTTP REST (`POST /1.0/sign`) | Standard gRPC Workload API (Unix socket) |
+| **Trust bundle distribution** | CA cert fetched by fingerprint at startup | Automatic — SPIRE pushes bundles to all agents |
+| **Auto-renewal** | Our `CertManager.refresh_loop()` polls expiry | SPIRE client library handles rotation transparently |
+| **Cross-domain federation** | Manual cert exchange | Built-in SPIRE federation API |
+| **Deployment complexity** | One Docker container | SPIRE Server + SPIRE Agent per node + workload registration entries |
+| **Good for** | Local dev, learning, small deployments | Kubernetes, multi-cloud, zero-trust production |
+
+**Why this project uses Step CA:** attestation requires a platform — Kubernetes, AWS, a Linux system with cgroup metadata. A local development project can't depend on that. Step CA gives us the full SPIFFE cert format and all the identity-binding behavior in the gateway, so everything you learn here transfers directly to a SPIRE deployment.
+
+---
+
 ### 2. X.509 Certificates
 
 An X.509 certificate is a document that says:
