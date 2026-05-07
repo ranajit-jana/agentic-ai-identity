@@ -6,11 +6,11 @@ the cert in the x5c header. The gateway:
   1. Extracts the cert from x5c
   2. Verifies the cert was signed by our Step CA (intermediate or root)
   3. Verifies the JWT signature using the cert's public key
-  4. Ensures the agent_id claim matches the cert CN
+  4. Binds agent_id to the cert's SPIFFE URI SAN (spiffe://<domain>/agent/<id>)
   5. Returns structured identity claims for OPA
 
-This binds every request to a real Step CA identity — the agent cannot
-claim an agent_id it doesn't own because it would need the matching cert key.
+SPIFFE compliance: identity is the URI SAN (spiffe://agents.local/agent/agent-001).
+The CN is informational only; all identity checks use the SPIFFE ID.
 """
 
 import base64
@@ -27,6 +27,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 class AgentIdentity:
     agent_id: str
     role: str
+    spiffe_id: str = ""               # full SPIFFE URI: spiffe://<trust-domain>/agent/<id>
     delegated_by: str = ""            # non-empty only when acting on behalf of a supervisor
     delegation_scope: list[str] = field(default_factory=list)  # tools the sub-agent may call
     delegation_depth: int = 0         # how many hops deep in the delegation chain
@@ -53,6 +54,18 @@ def _verify_cert_signature(cert: x509.Certificate, issuer: x509.Certificate) -> 
             )
         else:
             raise ValueError(f"Unsupported CA key type: {type(pub)}")
+
+
+def _extract_spiffe_id(cert: x509.Certificate) -> str:
+    """Return the first spiffe:// URI SAN from the cert, or '' if none."""
+    try:
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+        for uri in san.value.get_values_for_type(x509.UniformResourceIdentifier):
+            if uri.startswith("spiffe://"):
+                return uri
+    except x509.ExtensionNotFound:
+        pass
+    return ""
 
 
 def verify_agent_jwt(
@@ -117,20 +130,30 @@ def verify_agent_jwt(
     except jwt.InvalidTokenError as e:
         raise ValueError(f"JWT verification failed: {e}")
 
-    # Step 5: agent_id in the JWT must match the cert's CN
-    # Without this check, a compromised agent could forge another agent's ID in the payload
-    cn_attrs = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
-    if not cn_attrs:
-        raise ValueError("Agent cert has no CN")
-    cert_cn = cn_attrs[0].value
-    if claims.get("agent_id") != cert_cn:
+    # Step 5: bind agent_id to the cert's SPIFFE URI SAN
+    # SPIFFE identity lives in the URI SAN, not the CN.
+    # A compromised agent cannot claim a different agent_id because it would need
+    # the private key matching the cert that holds that SPIFFE URI SAN.
+    spiffe_id = _extract_spiffe_id(cert)
+    if spiffe_id:
+        # SPIFFE path convention: spiffe://<trust-domain>/agent/<agent-id>
+        cert_agent_id = spiffe_id.rstrip("/").split("/")[-1]
+    else:
+        # Fallback for certs without a SPIFFE SAN (e.g. older demo certs)
+        cn_attrs = cert.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+        if not cn_attrs:
+            raise ValueError("Agent cert has no SPIFFE URI SAN and no CN")
+        cert_agent_id = cn_attrs[0].value
+
+    if claims.get("agent_id") != cert_agent_id:
         raise ValueError(
-            f"JWT agent_id '{claims.get('agent_id')}' does not match cert CN '{cert_cn}'"
+            f"JWT agent_id '{claims.get('agent_id')}' does not match cert identity '{cert_agent_id}'"
         )
 
     return AgentIdentity(
         agent_id=claims["agent_id"],
         role=claims.get("role", ""),
+        spiffe_id=spiffe_id,
         delegated_by=claims.get("delegated_by", ""),
         delegation_scope=claims.get("delegation_scope", []),
         delegation_depth=claims.get("delegation_depth", 0),

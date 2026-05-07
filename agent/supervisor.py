@@ -44,8 +44,9 @@ from cryptography.x509.oid import NameOID
 
 load_dotenv()
 
-GATEWAY_URL  = os.getenv("GATEWAY_URL", "http://localhost:8443")
+GATEWAY_URL  = os.getenv("GATEWAY_URL",  "http://localhost:8443")
 CERTS_DIR    = Path(os.getenv("CERTS_DIR", ".certs"))
+TRUST_DOMAIN = os.getenv("TRUST_DOMAIN", "agents.local")
 
 # Cert state — populated by setup(); kept as module globals to avoid passing them everywhere
 _supervisor_cert_pem: bytes = b""
@@ -112,7 +113,8 @@ def _make_demo_pki() -> tuple[bytes, bytes, bytes, bytes, bytes]:
 
     def _issue(cn: str):
         """Issue a leaf cert signed by the demo CA."""
-        key  = generate_private_key(SECP256R1())
+        key = generate_private_key(SECP256R1())
+        spiffe_id = f"spiffe://{TRUST_DOMAIN}/agent/{cn}"
         cert = (
             x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
@@ -121,7 +123,13 @@ def _make_demo_pki() -> tuple[bytes, bytes, bytes, bytes, bytes]:
             .serial_number(x509.random_serial_number())
             .not_valid_before(now)
             .not_valid_after(now + datetime.timedelta(hours=1))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
+            .add_extension(
+                x509.SubjectAlternativeName([
+                    x509.UniformResourceIdentifier(spiffe_id),
+                    x509.DNSName(cn),
+                ]),
+                critical=False,
+            )
             .sign(ca_key, hashes.SHA256())
         )
         return (

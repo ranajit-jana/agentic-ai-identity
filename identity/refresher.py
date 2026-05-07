@@ -128,12 +128,14 @@ class CertManager:
         ca_fingerprint: str,
         certs_dir: Path = Path(".certs"),
         provisioner_name: str = "admin",
+        trust_domain: str = "agents.local",
     ):
         self.ca_url = ca_url.rstrip("/")
         self.agent_id = agent_id
         self.provisioner_jwk = provisioner_jwk    # decrypted provisioner key from ca.json
         self.ca_fingerprint = ca_fingerprint      # SHA-256 of CA root cert — prevents MITM on first fetch
         self.provisioner_name = provisioner_name
+        self.trust_domain = trust_domain
         self.certs_dir = Path(certs_dir)
         self.certs_dir.mkdir(exist_ok=True)
         self._cert: _Cert | None = None
@@ -161,6 +163,7 @@ class CertManager:
             ca_fingerprint=os.environ["STEP_CA_FINGERPRINT"],
             certs_dir=Path(os.getenv("CERTS_DIR", ".certs")),
             provisioner_name=os.getenv("STEP_CA_PROVISIONER", "admin"),
+            trust_domain=os.getenv("TRUST_DOMAIN", "agents.local"),
         )
 
     # ------------------------------------------------------------------
@@ -221,7 +224,8 @@ class CertManager:
                 "iss": self.provisioner_name,         # provisioner name (not kid)
                 "jti": str(uuid.uuid4()),             # unique — prevents OTT reuse
                 "nbf": now,
-                "sans": [self.agent_id],              # requested SAN in the cert
+                # SPIFFE URI SAN — Step CA detects spiffe:// and issues it as a URI SAN
+                "sans": [f"spiffe://{self.trust_domain}/agent/{self.agent_id}"],
                 "sub": self.agent_id,
                 "sha": self.ca_fingerprint,
             },
@@ -233,11 +237,16 @@ class CertManager:
     def _generate_csr(self) -> tuple:
         # Fresh key for each cert — never reuse keys across cert issuances
         key = generate_private_key(SECP256R1())
+        spiffe_id = f"spiffe://{self.trust_domain}/agent/{self.agent_id}"
         csr = (
             x509.CertificateSigningRequestBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, self.agent_id)]))
             .add_extension(
-                x509.SubjectAlternativeName([x509.DNSName(self.agent_id)]),
+                x509.SubjectAlternativeName([
+                    # SPIFFE X.509-SVID: identity lives in the URI SAN, not the CN
+                    x509.UniformResourceIdentifier(spiffe_id),
+                    x509.DNSName(self.agent_id),   # keep for tooling that expects DNS SAN
+                ]),
                 critical=False,
             )
             .sign(key, hashes.SHA256())

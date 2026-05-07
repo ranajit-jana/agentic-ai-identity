@@ -53,11 +53,12 @@ from security.judge import evaluate_prompt
 
 load_dotenv()
 
-GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8443")
-AGENT_ID    = os.getenv("AGENT_ID",    "agent-001")
-AGENT_ROLE  = os.getenv("AGENT_ROLE",  "analyst")
-CERTS_DIR   = Path(os.getenv("CERTS_DIR", ".certs"))
-MODEL       = os.getenv("AGENT_MODEL", "claude-sonnet-4-6")
+GATEWAY_URL  = os.getenv("GATEWAY_URL",  "http://localhost:8443")
+AGENT_ID     = os.getenv("AGENT_ID",     "agent-001")
+AGENT_ROLE   = os.getenv("AGENT_ROLE",   "analyst")
+CERTS_DIR    = Path(os.getenv("CERTS_DIR", ".certs"))
+MODEL        = os.getenv("AGENT_MODEL",  "claude-sonnet-4-6")
+TRUST_DOMAIN = os.getenv("TRUST_DOMAIN", "agents.local")
 
 # Cert bytes — loaded once at startup, refreshed in background by _keep_certs_fresh
 _cert_pem: bytes = b""
@@ -234,6 +235,7 @@ def _make_demo_pki() -> tuple[bytes, bytes, bytes, bytes, bytes]:
 
     def _agent_cert(cn: str):
         key = generate_private_key(SECP256R1())
+        spiffe_id = f"spiffe://{TRUST_DOMAIN}/agent/{cn}"
         cert = (
             x509.CertificateBuilder()
             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
@@ -242,7 +244,13 @@ def _make_demo_pki() -> tuple[bytes, bytes, bytes, bytes, bytes]:
             .serial_number(x509.random_serial_number())
             .not_valid_before(now)
             .not_valid_after(now + datetime.timedelta(hours=1))
-            .add_extension(x509.SubjectAlternativeName([x509.DNSName(cn)]), critical=False)
+            .add_extension(
+                x509.SubjectAlternativeName([
+                    x509.UniformResourceIdentifier(spiffe_id),
+                    x509.DNSName(cn),
+                ]),
+                critical=False,
+            )
             .sign(ca_key, hashes.SHA256())
         )
         return (
