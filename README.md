@@ -889,6 +889,8 @@ Set `TRACING_MODE` in `.env` to change what gets sent to Langfuse:
 
 ## Further Reading
 
+- **[policy.md](policy.md):** how the SPIFFE + OPA concepts in this project extend to a full Kubernetes zero-trust stack (SPIFFE/SPIRE, Cilium, Envoy, OPA, Kyverno)
+
 If you want to go deeper on any of the concepts here:
 
 - **SPIFFE specification:** the actual SPIFFE and SPIRE specs at spiffe.io — covers X.509-SVID, JWT-SVID, and the Workload API
